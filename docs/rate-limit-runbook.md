@@ -12,7 +12,11 @@
 | `/img`                    | cache-busting query による帯域濫用 | Cloudflare 帯域コスト増加        | rate limit + query normalization |
 | `/api/diagnosis/evaluate` | 大量リクエスト                     | D1 read 増加、CPU 時間消費       | rate limit                       |
 
-## Repo 内 Rate Limit (KV ベース)
+## Repo 内 Rate Limit (Native 優先 + KV fallback)
+
+Cloudflare Workers Native Rate Limiting binding が対象 endpoint に設定されている場合は Native binding を優先する。未設定 endpoint、または Native runtime 障害時に `KV` binding が利用可能なら、既存 KV 固定窓 limiter を compatibility fallback として使用する。
+
+Production の Native binding / namespace ID はこの repo のコード変更だけでは有効化しない。設定値・read-back・429 実測まで含む移行ゲートは [`docs/native-rate-limit-migration.md`](./native-rate-limit-migration.md) を正とする。
 
 ### 設定値
 
@@ -22,9 +26,11 @@
 | `/img`                    | 60s    | 60           | 60s         |
 | `/api/diagnosis/evaluate` | 60s    | 20           | 60s         |
 
-### KV Namespace
+Native binding 側の `simple.limit` / `simple.period` も上表と一致させる。3 endpoint group は異なる上限を持つため、Production 移行時は個別 binding として設定・検証する。
 
-Rate limit 用の KV namespace を wrangler に追加する:
+### KV Namespace (compatibility fallback)
+
+既存 `KV` namespace は Native migration 中の fallback と click dedup 用途を兼ねる。Native rate limit を有効化した後も、click dedup が KV を使用するため、単純に `KV` binding を削除しない。
 
 ```jsonc
 // wrangler.worker.jsonc
@@ -35,11 +41,15 @@ Rate limit 用の KV namespace を wrangler に追加する:
 
 ### 適用手順
 
+Native migration を行わない現行環境では、KV fallback の既存手順を維持する:
+
 1. Cloudflare Dashboard で KV namespace を作成
 2. wrangler に binding を追加
 3. `wrangler deploy` でデプロイ
 4. 正常リクエストが通ることを確認
 5. 閾値超過時に 429 が返ることを確認
+
+Native migration を行う場合は上記を直接置き換えず、`docs/native-rate-limit-migration.md` の Production completion gate に従う。
 
 ## Cloudflare WAF/Rate Limiting (Edge 側)
 
@@ -79,7 +89,7 @@ Burst: 5
 
 ### 適用前の確認
 
-1. **Cloudflare Pro 以上** が必要（Free プランでは Rate Limiting が使えない場合がある）
+1. 利用中の Cloudflare plan で必要な Rate Limiting / WAF 機能と制限を公式 dashboard/docs で確認する
 2. 正常ユーザーが rate limit に引っかからないことを確認
 3. Bot の検出ロジックが過剰でないことを確認
 
@@ -132,7 +142,7 @@ X-RateLimit-Reset: 1692633600
 ### 現状の方針
 
 - アプリケーション内のUAパターン判定は実装しない（以前の `isLikelyBot` はどの経路からも呼ばれない死蔵コードだったため削除済み）。
-- bot対策は **rate limit（KV固定窓）+ click dedup（5秒窓）** と、Cloudflare WAF の edge 側ルール（下記）で担う。
+- bot対策は **rate limit（Native優先・KV fallback）+ click dedup（5秒窓）** と、Cloudflare WAF の edge 側ルール（下記）で担う。
 
 ### Click dedup の識別子（日次saltローテーション）
 
@@ -160,7 +170,8 @@ KV dedupキー = click_dedup:{identifier}:{providerKey}:{providerItemId}
 ### 注意事項
 
 - IP/UA を保存しない（プライバシー最小化）。click_events には商品・バージョン・時刻のみ記録する。
-- KV障害時のrate limitは可用性優先でfail-open（通過させる）一方、KV binding不在の設定不整合は503でfail-closedする。この思想の違いは意図的。
+- rate-limit coverage 自体が無い設定不整合（対象 Native binding も KV も無い）は公開 host で503 fail-closedする。
+- Native runtime 障害時は KV があれば fallback し、KV も利用不能な runtime 障害は既存方針どおり可用性優先で fail-open する。設定欠損と runtime 障害を混同しない。
 
 ## 監視
 
@@ -189,3 +200,4 @@ wrangler d1 execute product-finder-platform --command "SELECT COUNT(*) FROM clic
 | ---------- | --------------------------------------------- | -------------- |
 | 2026-08-21 | 初版作成                                      | Issue #26 対応 |
 | 2026-08-24 | click dedup 識別子を日次salt込みSHA-256に変更 | Issue #64 対応 |
+| 2026-09-03 | Native優先 + KV fallback の移行契約を追記     | Issue #73 対応 |

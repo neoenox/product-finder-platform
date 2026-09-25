@@ -9,5 +9,5 @@
  *   if (blocked) return blocked;
  *   // ... handler logic
  */
-export { runSecurityChecks } from "./middleware";
+export { hasRateLimitCoverage, runSecurityChecks } from "./middleware";
 export { RATE_LIMITS } from "./rate-limiter";

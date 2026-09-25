@@ -10,7 +10,7 @@ import {
 import { handleRedirect } from "./redirect";
 import { handleDevSeed } from "./dev-seed";
 import { handleImageProxy } from "./image-proxy";
-import { runSecurityChecks } from "./security";
+import { hasRateLimitCoverage, runSecurityChecks } from "./security";
 
 const MAX_JSON_BODY_BYTES = 32 * 1024;
 
@@ -75,16 +75,19 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
     }
     if (pathname === "/api/ready" || pathname === "/api/ready/") {
       // /health はプロセス生存確認、/ready は実トラフィックを受けられるかの確認。
-      // rate-limit対象APIがfail-closedのため、公開環境でKV bindingが欠けている場合は
+      // 全rate-limit対象endpointがNative bindingまたはKV fallbackで保護されない場合は
       // DB/catalogが正常でもready=trueにしない。ローカルloopbackのみ明示bypassを許可する。
       const localBypass = env.RATE_LIMIT_BYPASS === "1" && isLoopbackHost(url.hostname);
-      if (!env.KV && !localBypass) {
+      if (!hasRateLimitCoverage(env) && !localBypass) {
         return json(
           {
             ok: false,
             service: "product-finder-platform",
             error: "rate_limit_unavailable",
-            checks: { rateLimitKv: false },
+            checks: {
+              rateLimitCoverage: false,
+              rateLimitKv: Boolean(env.KV),
+            },
           },
           { status: 503 }
         );
